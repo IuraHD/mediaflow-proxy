@@ -155,9 +155,7 @@ def test_omitted_second_period_start_is_inferred():
     assert profiles[1]["segments"][0]["start_time"].timestamp() == 12
 
 
-@pytest.mark.parametrize(
-    "now,expected", [(4, [0]), (20, [8, 12, 16]), (21, [8, 12, 16]), (24, [12, 16, 20])]
-)
+@pytest.mark.parametrize("now,expected", [(4, [0]), (20, [8, 12, 16]), (21, [8, 12, 16]), (24, [12, 16, 20])])
 def test_live_window_contains_only_available_unexpired_segments(monkeypatch, now, expected):
     freeze_clock(monkeypatch, now)
     data = manifest({"@d": "4", "@r": "-1"}, duration=None, live=True, start_number=7)
