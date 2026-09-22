@@ -9,9 +9,14 @@ from mediaflow_proxy.remuxer import media_source
 
 @pytest.mark.parametrize(
     "status,offset,limit,expected",
-    [(200, 4, 3, b"456"), (200, 4, None, b"456789"),
-     (200, 0, 0, b""), (200, 0, 2, b"01"),
-     (206, 4, 3, b"456"), (206, 4, None, b"456789")],
+    [
+        (200, 4, 3, b"456"),
+        (200, 4, None, b"456789"),
+        (200, 0, 0, b""),
+        (200, 0, 2, b"01"),
+        (206, 4, 3, b"456"),
+        (206, 4, None, b"456789"),
+    ],
 )
 async def test_stream_obeys_requested_range(monkeypatch, status, offset, limit, expected):
     requests = []
