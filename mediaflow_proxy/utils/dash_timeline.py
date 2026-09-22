@@ -34,6 +34,8 @@ def expand_timeline(
     if any(int(entry["@d"]) <= 0 for entry in timelines):
         raise ValueError("SegmentTimeline segment duration must be positive")
     # Reject unbounded runs before allocating any preceding finite runs.
+    # DASH-IF explicit addressing defines a negative S@r, not only -1,
+    # as repeat-to-end: https://dashif.org/Guidelines-TimingModel/#explicit-addressing
     for index, entry in enumerate(timelines):
         if int(entry.get("@r", 0)) >= 0:
             continue

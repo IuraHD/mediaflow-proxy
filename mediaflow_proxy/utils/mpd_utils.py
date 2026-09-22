@@ -145,6 +145,16 @@ def _resolve_period_bounds(periods: list[dict], presentation_duration: Optional[
         if start is None:
             raise ValueError("Cannot determine DASH period start from the manifest")
         duration = durations[index]
+        if duration is not None:
+            end = start + duration
+            next_start = starts[index + 1] if index + 1 < len(starts) else None
+            for boundary, message in (
+                (next_start, "DASH period duration overlaps the next period"),
+                (presentation_end, "DASH period end exceeds the presentation duration"),
+            ):
+                # Durations are parsed as floats; allow decimal addition roundoff.
+                if boundary is not None and end > boundary and not math.isclose(end, boundary, rel_tol=0, abs_tol=1e-9):
+                    raise ValueError(message)
         if duration is None:
             if index + 1 < len(starts) and starts[index + 1] is not None:
                 duration = starts[index + 1] - start
