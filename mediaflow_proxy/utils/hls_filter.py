@@ -7,12 +7,36 @@ from decimal import Decimal
 from urllib.parse import urljoin
 
 
+_GLOBAL_TAGS = {
+    "#EXTM3U",
+    "#EXT-X-VERSION",
+    "#EXT-X-TARGETDURATION",
+    "#EXT-X-PLAYLIST-TYPE",
+    "#EXT-X-INDEPENDENT-SEGMENTS",
+    "#EXT-X-I-FRAMES-ONLY",
+    "#EXT-X-START",
+    "#EXT-X-DEFINE",
+    "#EXT-X-ALLOW-CACHE",
+}
+_LOW_LATENCY_TAGS = {
+    "#EXT-X-PART",
+    "#EXT-X-PART-INF",
+    "#EXT-X-PRELOAD-HINT",
+    "#EXT-X-SERVER-CONTROL",
+    "#EXT-X-RENDITION-REPORT",
+    "#EXT-X-SKIP",
+}
+
+
 def attributes(line: str) -> dict[str, str]:
+    """Read an HLS attribute list without splitting quoted comma-containing values."""
     return dict(re.findall(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)', line.partition(":")[2]))
 
 
 @dataclass
 class Segment:
+    """A complete media segment and the source state needed to play it."""
+
     uri: str
     duration: Decimal
     extinf: str
@@ -26,6 +50,7 @@ class Segment:
 
 
 def read_segments(content: str, base_url: str) -> tuple[list[str], list[Segment]]:
+    """Associate local tags with the next complete segment and resolve inherited state."""
     headers, segments = [], []
     keys = {}
     init_map = None
@@ -65,10 +90,10 @@ def read_segments(content: str, base_url: str) -> tuple[list[str], list[Segment]
             pending_range = (int(length), int(offset) if offset else None)
         elif line == "#EXT-X-ENDLIST":
             continue
-        elif line.startswith(("#EXT-X-GAP", "#EXT-X-BITRATE")) or (extinf and line.startswith("#")):
-            tags.append(line)
-        elif line.startswith("#"):
+        elif line.partition(":")[0] in _GLOBAL_TAGS:
             headers.append(line)
+        elif line.startswith("#"):
+            tags.append(line)
         elif extinf:
             duration = Decimal(extinf.partition(":")[2].split(",", 1)[0])
             resource = urljoin(base_url, line)
@@ -95,17 +120,43 @@ def read_segments(content: str, base_url: str) -> tuple[list[str], list[Segment]
 
 
 def filter_playlist(content: str, ranges: list[dict], base_url: str) -> str:
-    if "#EXT-X-STREAM-INF:" in content or "#EXT-X-I-FRAME-STREAM-INF:" in content:
+    """Remove whole segments, preserving their state and remapping the playback start.
+
+    Low-latency and delta playlists cannot be safely filtered from complete-segment
+    durations alone. Reject them when filtering is requested rather than leak
+    skipped partial media or use an incomplete presentation timeline.
+    """
+    if not ranges or "#EXT-X-STREAM-INF:" in content or "#EXT-X-I-FRAME-STREAM-INF:" in content:
         return content
+    if any(line.strip().partition(":")[0] in _LOW_LATENCY_TAGS for line in content.splitlines()):
+        raise ValueError("Low-latency or delta HLS playlists do not support interval filtering")
     headers, segments = read_segments(content, base_url)
     intervals = [(Decimal(str(item["start"])), Decimal(str(item["end"]))) for item in ranges]
     kept = []
+    kept_spans = []
     elapsed = Decimal(0)
     for segment in segments:
         end = elapsed + segment.duration
         if not any(elapsed < stop and end > start for start, stop in intervals):
             kept.append(segment)
+            kept_spans.append((elapsed, end))
         elapsed = end
+
+    if len(kept) != len(segments):
+        remapped_headers = []
+        kept_duration = sum((end - start for start, end in kept_spans), Decimal(0))
+        for line in headers:
+            if line.startswith("#EXT-X-START:"):
+                if not kept:
+                    continue
+                offset = Decimal(attributes(line)["TIME-OFFSET"])
+                target = offset if offset >= 0 else elapsed + offset
+                mapped = sum((max(Decimal(0), min(target, end) - start) for start, end in kept_spans), Decimal(0))
+                if offset < 0:
+                    mapped -= kept_duration
+                line = re.sub(r"TIME-OFFSET=[^,]*", f"TIME-OFFSET={mapped}", line)
+            remapped_headers.append(line)
+        headers = remapped_headers
 
     if kept:
         headers = [
@@ -116,17 +167,21 @@ def filter_playlist(content: str, ranges: list[dict], base_url: str) -> str:
         headers.append(f"#EXT-X-MEDIA-SEQUENCE:{kept[0].sequence}")
         if kept[0].discontinuities:
             headers.append(f"#EXT-X-DISCONTINUITY-SEQUENCE:{kept[0].discontinuities}")
-    # Explicit IVs need protocol version 2. Byte ranges already require version 4.
+    # Materialized IVs and byte ranges need versions 2 and 4 respectively.
+    minimum_version = 4 if any(seg.byte_range for seg in kept) else 1
     if any(attributes(key).get("METHOD") == "AES-128" for seg in kept for key in seg.keys.values()):
+        minimum_version = max(2, minimum_version)
+    if minimum_version > 1:
         versions = [int(line.partition(":")[2]) for line in headers if line.startswith("#EXT-X-VERSION:")]
         headers = [line for line in headers if not line.startswith("#EXT-X-VERSION:")]
-        headers.insert(1, f"#EXT-X-VERSION:{max([2] + versions)}")
+        headers.insert(1, f"#EXT-X-VERSION:{max([minimum_version] + versions)}")
     output = list(headers)
     emitted_keys = {}
     emitted_map = None
     previous = None
 
     def emit_keys(wanted):
+        """Emit only encryption state transitions required by the next resource."""
         nonlocal emitted_keys
         for fmt, line in wanted.items():
             if emitted_keys.get(fmt) != line:
@@ -166,6 +221,7 @@ def filter_playlist(content: str, ranges: list[dict], base_url: str) -> str:
 
 
 def prefetchable_urls(content: str, base_url: str) -> list[str]:
+    """Return complete, non-gap resources suitable for the whole-file prebuffer."""
     if "#EXT-X-STREAM-INF:" in content or "#EXT-X-I-FRAME-STREAM-INF:" in content:
         return []
     _, segments = read_segments(content, base_url)

@@ -138,6 +138,8 @@ class M3U8Processor:
             no_proxy (bool, optional): If True, returns the manifest without proxying any URLs. Defaults to False.
             skip_segments (List[dict], optional): List of time segments to skip. Each dict should have
                                                   'start', 'end' (in seconds), and optionally 'type'.
+                                                  Low-latency and delta media playlists are rejected
+                                                  when interval filtering is requested.
             start_offset (float, optional): Time offset in seconds for EXT-X-START tag. Use negative values
                                            for live streams to start behind the live edge.
         """
